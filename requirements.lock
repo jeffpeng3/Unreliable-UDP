@@ -9,3 +9,4 @@
 #   generate-hashes: false
 #   universal: false
 
+tqdm==4.67.1

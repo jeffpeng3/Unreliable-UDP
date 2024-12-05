@@ -7,20 +7,23 @@ class Header:
     fileName: str
     fileSize: int
     slices: int
-    uid: int
+    uuid: int
 
 
 @dataclass
 class Package:
-    uid: int
+    uuid: int
     serialNo: int
     data: bytes
     checksum: bytes
 
+    def __bool__(self):
+        return True
+
 
 @dataclass
 class ReSendRequest:
-    uid: int
+    uuid: int
     serialNo: int
 
 
