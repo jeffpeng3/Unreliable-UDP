@@ -1,22 +1,35 @@
-from socket import socket, AF_INET, SOCK_DGRAM, setdefaulttimeout
+from socket import socket, AF_INET, SOCK_DGRAM
 from argparse import ArgumentParser, Namespace
 from pickle import loads, dumps
 from base import Header, Package, Status, ReSendRequest, Message
 from random import random, sample
 from uuid import uuid4
 from hashlib import sha1
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from time import time
-from tqdm import tqdm
 
-def sendUDP(sock:socket, data:object, addr:tuple[str,int], drop_rate=0.05):
+
+def dummy_print(*args, **kwargs):
+    pass
+
+
+def info(*args, **kwargs):
+    print("[Sender]", *args, **kwargs)
+
+
+DEBUG = False
+
+if not DEBUG:
+    info = print
+    print = dummy_print
+
+
+def sendUDP(sock: socket, data: object, addr: tuple[str, int], drop_rate=0.005):
     if random() < drop_rate:
-        # print("Oops drop package")
+        print("Oops drop package")
         return
     sock.sendto(dumps(data), addr)
 
 
-def Parse() -> Namespace:
+def parse() -> Namespace:
     parser = ArgumentParser(description="Send via UDP")
 
     parser.add_argument("-H", "--host", dest="host", default="localhost")
@@ -26,13 +39,13 @@ def Parse() -> Namespace:
     parser.add_argument("file")
 
     args = parser.parse_args()
-    # print(args.host, args.port, args.file, args.batch_size, args.drop_rate)
     return args
 
 
 def loadFile(file: str) -> bytes:
     with open(file, "rb") as f:
         return f.read()
+
 
 def PreparePackages(data: bytes, batch_size: int, uuid: int) -> list[Package]:
     packages: list[Package] = []
@@ -42,72 +55,70 @@ def PreparePackages(data: bytes, batch_size: int, uuid: int) -> list[Package]:
         packages.append(Package(uuid, idx, temp, sha1sum))
     return packages
 
-def main():
-    setdefaulttimeout(10)
-    args = Parse()
-    data = loadFile(args.file)
 
+def send_data(
+    fileName: str,
+    data: bytes,
+    host: str,
+    port: int,
+    batch_size: int,
+    drop_rate: float = 0.0,
+):
     fileSize = len(data)
     uuid = uuid4().int
-    header = Header(args.file, fileSize, fileSize // args.batch_size + 1, uuid)
+    header = Header(fileName, fileSize, fileSize // batch_size + 1, uuid)
 
-    packages:list[Package] = PreparePackages(data, args.batch_size, uuid)
-
-    # print(f"Sending {header} packages")
+    packages: list[Package] = PreparePackages(data, batch_size, uuid)
 
     sock = socket(AF_INET, SOCK_DGRAM)
-    sendUDP(sock, header, (args.host, args.port), 0)
+    sock.settimeout(1)
 
-    data, addr = sock.recvfrom(1024)
-    requestStatus = loads(data)
-    if isinstance(requestStatus, Message) and requestStatus.status != Status.READY:
-        # print("Request rejected")
-        exit(1)
+    for retryCount in range(5):
+        try:
+            print(f"Sending {header} packages")
 
-    # print(f"Sending {len(packages)} packages")
-    for package in sample(packages,len(packages)):
-        if random() < args.drop_rate:
-            # print(f"Oops drop package {package.serialNo}")
-            continue
-        # print(f"Sending package {package.serialNo}")
-        sendUDP(sock, package, (args.host, args.port), args.drop_rate)
-        # sleep(0.01)
+            sendUDP(sock, header, (host, port))
 
-    while True:
-        data, addr = sock.recvfrom(1024)
-        message = loads(data)
-        if isinstance(message, ReSendRequest):
-            # print(f"Resending package {message.serialNo}")
-            sock.sendto(dumps(packages[message.serialNo]), (args.host, args.port))
-        elif isinstance(message, Message):
-            if message.status == Status.SUCESS:
-                # print("Success")
-                break
-            elif message.status == Status.FAIL:
-                # print("Fail")
-                break
+            data, addr = sock.recvfrom(1024)
+            requestStatus = loads(data)
+            if (
+                isinstance(requestStatus, Message)
+                and requestStatus.status != Status.READY
+            ):
+                print("Request rejected")
+                raise Exception("Request rejected")
 
+            print(f"Sending {len(packages)} packages")
+            for package in sample(packages, len(packages)):
+                if random() < drop_rate:
+                    print(f"Oops drop package {package.serialNo}")
+                    continue
+                print(f"Sending package {package.serialNo}")
+                sendUDP(sock, package, (host, port), drop_rate)
 
-def stress(total_runs: int, num_threads: int):
-
-    with ProcessPoolExecutor(max_workers=num_threads) as executor:
-        futures = {executor.submit(main): i for i in range(total_runs)}
-        with tqdm(total=total_runs, desc="Stress Test Progress", unit="task") as pbar:
-
-            for future in as_completed(futures):
-                pbar.update(1)
-                try:
-                    result = future.result()
-                    # print(f"Thread {result}: Completed.")
-                except Exception as e:
-                    # print(f"Thread {futures[future]}: Failed with exception {e}.")
-                    print(e)
-                    return
-
-    print("Stress test completed.")
+            while True:
+                data, addr = sock.recvfrom(1024)
+                message = loads(data)
+                if isinstance(message, ReSendRequest):
+                    print(f"Resending package {message.serialNo}")
+                    sock.sendto(dumps(packages[message.serialNo]), (host, port))
+                elif isinstance(message, Message):
+                    if message.status == Status.SUCESS:
+                        info("Success")
+                        return
+                    elif message.status == Status.FAIL:
+                        print("Fail")
+                        break
+                else:
+                    raise Exception("Unknown error")
+        except Exception as e:
+            if retryCount == 2:
+                print(f"Failed to send data: {e}")
+                exit(1)
+            print(f"failed to send data: {e}, retrying...")
 
 
 if __name__ == "__main__":
-    start_time = time()
-    stress(1000,12)
-    print(f"Total time taken: {time() - start_time:.2f} seconds")
+    args = parse()
+    data = loadFile(args.file)
+    send_data(args.file, data, args.host, args.port, args.batch_size, args.drop_rate)
